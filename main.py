@@ -1,14 +1,16 @@
 import sys
 import requests
 import keyboard
+import base64
+import time
 from threading import Thread
 
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame, QListWidget, QListWidgetItem
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QInputDialog,
+    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame, QListWidget, QListWidgetItem, QDialog
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush, QPixmap, QLinearGradient, QFont, QTextCursor
 
 
@@ -306,6 +308,62 @@ class SearchResultsWindow(QWidget):
             self.move(event.globalPosition().toPoint() - self.drag_position)
             event.accept()
 
+    def show_cookie_input_dialog(self):
+        """显示手动输入Cookie的对话框"""
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("手动输入Cookie")
+        dialog.setLabelText("请输入网易云音乐Cookie:")
+        dialog.setInputMode(QInputDialog.TextInput)
+        dialog.setTextValue("")
+        dialog.setStyleSheet("""
+            QInputDialog {
+                background: rgba(30, 30, 40, 0.9);
+                color: white;
+            }
+            QLabel {
+                color: white;
+                font-size: 16px;
+            }
+            QLineEdit {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 10px;
+                padding: 10px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 8px 16px;
+                color: white;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        
+        if dialog.exec():
+            cookie = dialog.textValue()
+            if not cookie:
+                QMessageBox.warning(self, "警告", "Cookie不能为空")
+                return
+                
+            # 验证Cookie格式
+            if "MUSIC_U=" not in cookie or "NMTID=" not in cookie:
+                QMessageBox.warning(self, "警告", "Cookie格式不正确，必须包含MUSIC_U和NMTID")
+                return
+                
+            # 保存Cookie
+            self.parent.cookies = {
+                "MUSIC_U": cookie.split("MUSIC_U=")[1].split(";")[0],
+                "NMTID": cookie.split("NMTID=")[1].split(";")[0]
+            }
+            self.parent.save_cookie(cookie)
+            self.parent.update_login_status("已登录")
+            self.close()
+
     def keyPressEvent(self, event):
         """键盘事件"""
         if event.key() == Qt.Key_Escape:
@@ -321,6 +379,8 @@ class SearchResultsWindow(QWidget):
             self.close()
 
 class ModernMusicPlayer(QWidget):
+    COOKIE_FILE = "user_cookie.json"  # Cookie保存文件名
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RTLite")
@@ -333,7 +393,7 @@ class ModernMusicPlayer(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.api_url = "https://ncm.zhenxin.me"
-
+        
         # 初始化播放器
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -342,6 +402,9 @@ class ModernMusicPlayer(QWidget):
 
         self.playing = False
         self.current_song = None
+
+        # 初始化时尝试加载cookie
+        self.cookies = self.load_cookie()
 
         # 初始化UI
         self.init_ui()
@@ -570,10 +633,38 @@ class ModernMusicPlayer(QWidget):
         progress_layout.addWidget(self.progress_slider)
         progress_layout.addWidget(self.time_total)
 
-        # 控制按钮
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(20)
-        button_layout.setAlignment(Qt.AlignCenter)
+        # 登录/重新登录按钮
+        self.login_button = QPushButton("重新登录" if self.cookies else "登录")
+        self.login_button.setFixedHeight(45)
+        self.login_button.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        self.login_button.clicked.connect(self.show_qr_login)
+        
+        # 登录状态标签
+        self.login_status = QLabel("未登录", self)
+        self.login_status.setStyleSheet("""
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+            padding-left: 10px;
+        """)
+        self.login_status.setObjectName("loginStatus")
+        
+        # 登录状态布局
+        login_layout = QHBoxLayout()
+        login_layout.addWidget(self.login_button)
+        login_layout.addWidget(self.login_status)
+
+        # 控制按钮布局
+        control_button_layout = QHBoxLayout()
+        control_button_layout.setSpacing(20)
+        control_button_layout.setAlignment(Qt.AlignCenter)
 
         # 播放/暂停按钮
         self.play_pause_button = QPushButton()
@@ -618,13 +709,18 @@ class ModernMusicPlayer(QWidget):
         volume_layout.addWidget(self.volume_slider)
         volume_layout.addWidget(self.volume_label)
 
-        # 添加到控制布局
-        button_layout.addWidget(self.play_pause_button)
+        # 添加到控制按钮布局
+        control_button_layout.addWidget(self.play_pause_button)
         control_layout.addLayout(progress_layout)
-        control_layout.addLayout(button_layout)
+        control_layout.addLayout(control_button_layout)
         control_layout.addLayout(volume_layout)
 
-        # 添加到右侧布局
+        # 添加到右侧布局 - 将登录布局移到最上方
+        right_layout.addLayout(login_layout)
+        
+        # 初始化完成后更新登录状态
+        if self.cookies:
+            self.update_login_status("已登录")  # 会自动触发获取用户名逻辑
         right_layout.addWidget(self.search_input)
         right_layout.addWidget(self.search_button)
         right_layout.addWidget(self.lyrics_display, stretch=1)
@@ -632,6 +728,43 @@ class ModernMusicPlayer(QWidget):
 
         # 添加到主布局
         self.main_layout.addWidget(right_panel, stretch=2)
+
+    def show_qr_login(self):
+        """显示二维码登录窗口"""
+        self.login_window = QRLoginWindow(self.api_url, self)
+        self.login_window.show()
+        
+    def update_login_status(self, status):
+        """更新登录状态"""
+        if status == "已登录":
+            # 异步获取用户名
+            def get_username():
+                try:
+                    # 将cookie字典转换为字符串格式
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        "Cookie": cookie_str
+                    }
+                    response = requests.get(
+                        f"{self.api_url}/user/account",
+                        headers=headers
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('code') == 200:
+                            nickname = data.get('profile', {}).get('nickname', '用户')
+                            self.login_status.setText(f"你好！{nickname}")
+                            return
+                    # 如果获取失败，显示默认状态
+                    self.login_status.setText("已登录")
+                except Exception as e:
+                    print(f"获取用户名失败: {e}")
+                    self.login_status.setText("已登录")
+            
+            Thread(target=get_username, daemon=True).start()
+        else:
+            self.login_status.setText(status)
 
     def init_animations(self):
         """初始化动画效果"""
@@ -691,6 +824,8 @@ class ModernMusicPlayer(QWidget):
                     self.search_window.close()
                 if hasattr(self, 'exit_window') and self.exit_window:
                     self.exit_window.close()
+                if hasattr(self, 'login_window') and self.login_window:
+                    self.login_window.close()
                 
                 # 添加短暂延迟确保窗口完全关闭
                 QApplication.processEvents()
@@ -723,8 +858,18 @@ class ModernMusicPlayer(QWidget):
             song_name = detail["name"]
             artist_name = detail["ar"][0]["name"] if detail.get("ar") else "未知艺术家"
 
-            # 获取播放链接
-            url_res = requests.get(f"{self.api_url}/song/url", params={"id": song_id}).json()
+            # 获取播放链接 - 分离cookies和headers
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            cookies = None
+            if hasattr(self, 'cookies') and self.cookies:
+                cookies = {
+                    "MUSIC_U": self.cookies['MUSIC_U'],
+                    "NMTID": self.cookies['NMTID']
+                }
+            
+            url_res = requests.get(f"{self.api_url}/song/url", params={'id': song_id}, headers=headers, cookies=cookies).json()
             song_url = url_res.get("data", [{}])[0].get("url")
             if not song_url:
                 self.show_message("无法获取播放链接", "error")
@@ -761,8 +906,18 @@ class ModernMusicPlayer(QWidget):
             return
 
         try:
-            # 搜索歌曲
-            res = requests.get(f"{self.api_url}/search", params={"keywords": keyword}).json()
+            # 搜索歌曲 - 分离cookies和headers
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            cookies = None
+            if hasattr(self, 'cookies') and self.cookies:
+                cookies = {
+                    "MUSIC_U": self.cookies['MUSIC_U'],
+                    "NMTID": self.cookies['NMTID']
+                }
+                
+            res = requests.get(f"{self.api_url}/search", params={"keywords": keyword}, headers=headers, cookies=cookies).json()
             songs = res.get("result", {}).get("songs", [])
             if not songs:
                 self.show_message("未找到歌曲", "warning")
@@ -949,9 +1104,9 @@ class ModernMusicPlayer(QWidget):
         if self.lyric_index < 0 or self.lyric_index >= len(self.lyrics_data):
             return
 
-        # 上下各显示2行歌词
-        start = max(0, self.lyric_index - 2)
-        end = min(len(self.lyrics_data), self.lyric_index + 3)
+        # 上下各显示1行歌词
+        start = max(0, self.lyric_index - 1)
+        end = min(len(self.lyrics_data), self.lyric_index + 2)
 
         display_lines = []
         for i in range(start, end):
@@ -1021,6 +1176,601 @@ class ModernMusicPlayer(QWidget):
             self.exit_window.activateWindow()
         else:
             super().keyPressEvent(event)
+
+    def load_cookie(self):
+        """从注册表加载cookie"""
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\RTLite", 0, winreg.KEY_READ)
+            value, _ = winreg.QueryValueEx(key, "Cookie")
+            winreg.CloseKey(key)
+            return {
+                "MUSIC_U": value.split("MUSIC_U=")[1].split(";")[0] if "MUSIC_U=" in value else "",
+                "NMTID": value.split("NMTID=")[1].split(";")[0] if "NMTID=" in value else ""
+            }
+        except WindowsError as e:
+            if e.errno == 2:  # 键不存在
+                return None
+            print(f"从注册表加载cookie失败: {e}")
+            return None
+        except Exception as e:
+            print(f"加载cookie失败: {e}")
+            return None
+        
+    def save_cookie(self, cookie):
+        """保存cookie到注册表"""
+        try:
+            import winreg
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\RTLite")
+            winreg.SetValueEx(key, "Cookie", 0, winreg.REG_SZ, cookie)
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"保存cookie到注册表失败: {e}")
+
+class QRLoginWindow(QWidget):
+    """二维码登录窗口"""
+    def __init__(self, api_url, parent=None):
+        super().__init__(parent)
+        self.api_url = api_url
+        self.parent = parent
+        self.drag_position = None  # 初始化拖动位置变量
+        self.setWindowTitle("扫码登录")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(400, 500)
+        
+        # 主布局
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 30, 30, 30)
+        self.main_layout.setSpacing(20)
+        
+        # 标题
+        self.title_label = QLabel("扫码登录")
+        self.title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        
+        # 二维码标签 - 添加鼠标点击事件
+        self.qr_label = QLabel()
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setFixedSize(400, 400)
+        self.qr_label.setStyleSheet("""
+            background: white;
+            border-radius: 15px;
+        """)
+        self.qr_label.setCursor(Qt.PointingHandCursor)  # 设置手型光标
+        self.qr_label.mousePressEvent = self.refresh_qr_code  # 点击刷新
+        
+        # 状态标签
+        self.status_label = QLabel("正在生成二维码...")
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+            }
+        """)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        
+        # 手动输入Cookie按钮
+        self.manual_cookie_btn = QPushButton("手动输入Cookie")
+        self.manual_cookie_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        # 确保连接正确并添加调试输出
+        def on_manual_cookie_click():
+            self.show_cookie_input_dialog()
+        self.manual_cookie_btn.clicked.connect(on_manual_cookie_click)
+        
+        # 关闭按钮
+        self.close_button = QPushButton("关闭")
+        self.close_button.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        self.close_button.clicked.connect(self.close)
+        
+        # 添加到布局
+        self.main_layout.addWidget(self.title_label)
+        self.main_layout.addWidget(self.qr_label)
+        self.main_layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.manual_cookie_btn)
+        self.main_layout.addWidget(self.close_button)
+        
+        # 启动登录流程
+        self.start_login()
+    
+    def start_login(self):
+        """启动扫码登录流程"""
+        # 获取二维码key
+        try:
+            # 添加时间戳防止缓存
+            timestamp = int(time.time() * 1000)
+            key_res = requests.get(f"{self.api_url}/login/qr/key", params={
+                "timestamp": timestamp
+            }).json()
+            key = key_res.get("data", {}).get("unikey")
+            if not key:
+                self.status_label.setText("获取二维码key失败")
+                return
+                
+            # 生成二维码
+            # 添加时间戳防止缓存
+            timestamp = int(time.time() * 1000)
+            qr_res = requests.get(
+                f"{self.api_url}/login/qr/create", 
+                params={
+                    "key": key, 
+                    "qrimg": "true",
+                    "timestamp": timestamp
+                }
+            ).json()
+            qr_img = qr_res.get("data", {}).get("qrimg")
+            if not qr_img:
+                self.status_label.setText("生成二维码失败")
+                return
+                
+            # 显示二维码
+            self.show_qr_code(qr_img)
+            self.status_label.setText("请使用网易云音乐APP扫码")
+            
+            # 启动轮询检查登录状态
+            self.key = key
+            self.check_timer = self.startTimer(1000)  # 每3秒检查一次
+            
+        except Exception as e:
+            self.status_label.setText(f"登录失败: {str(e)}")
+    
+    def refresh_qr_code(self, event=None):
+        """刷新二维码"""
+        if event:  # 如果是鼠标事件触发
+            event.accept()
+        if hasattr(self, 'check_timer'):
+            self.killTimer(self.check_timer)
+        self.status_label.setText("正在刷新二维码...")
+        QTimer.singleShot(100, self.start_login)  # 延迟100ms确保timer被清理
+
+    def show_cookie_input_dialog(self):
+        """显示手动输入Cookie的对话框"""
+        dialog = CookieInputDialog(self)
+        if dialog.exec():
+            cookie = dialog.get_cookie()
+            if not cookie:
+                QMessageBox.warning(self, "警告", "Cookie不能为空")
+                return
+                
+            # 验证Cookie格式
+            if "MUSIC_U=" not in cookie or "NMTID=" not in cookie:
+                QMessageBox.warning(self, "警告", "Cookie格式不正确，必须包含MUSIC_U和NMTID")
+                return
+                
+            # 保存Cookie
+            self.cookies = {
+                "MUSIC_U": cookie.split("MUSIC_U=")[1].split(";")[0],
+                "NMTID": cookie.split("NMTID=")[1].split(";")[0]
+            }
+            self.save_cookie(cookie)
+            self.update_login_status("已登录")
+        dialog.setWindowTitle("手动输入Cookie")
+        dialog.setWindowFlags(Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground)
+        dialog.resize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+        
+        # 标题
+        title = QLabel("请输入网易云音乐Cookie:")
+        title.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+        
+        # 多行输入框
+        text_edit = QTextEdit()
+        text_edit.setStyleSheet("""
+            QTextEdit {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 10px;
+                padding: 15px;
+                color: white;
+                font-size: 16px;
+                min-height: 200px;
+            }
+        """)
+        text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+        
+        # 按钮布局
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(15)
+        
+        # 确认按钮
+        btn_ok = QPushButton("确定")
+        btn_ok.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00b4ff, stop:1 #0080ff
+                );
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00c4ff, stop:1 #0090ff
+                );
+            }
+        """)
+        
+        # 取消按钮
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        
+        layout.addWidget(title)
+        layout.addWidget(text_edit, stretch=1)
+        layout.addLayout(btn_layout)
+        
+        def on_ok():
+            cookie = text_edit.toPlainText().strip()
+            if cookie:
+                # 验证Cookie格式
+                if "MUSIC_U=" not in cookie or "NMTID=" not in cookie:
+                    QMessageBox.warning(dialog, "警告", "Cookie格式不正确，必须包含MUSIC_U和NMTID")
+                    return
+                    
+                # 保存Cookie
+                self.parent.cookies = {
+                    "MUSIC_U": cookie.split("MUSIC_U=")[1].split(";")[0],
+                    "NMTID": cookie.split("NMTID=")[1].split(";")[0]
+                }
+                self.parent.save_cookie(cookie)
+                self.parent.update_login_status("已登录")
+                dialog.close()
+                self.close()
+        
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dialog.close)
+        
+        dialog.exec()
+
+    def show_qr_code(self, base64_img):
+        """显示base64格式的二维码图片"""
+        try:
+            # 移除base64前缀
+            if "base64," in base64_img:
+                base64_img = base64_img.split("base64,")[1]
+                
+            # 解码图片
+            img_data = base64.b64decode(base64_img)
+            pixmap = QPixmap()
+            pixmap.loadFromData(img_data)
+            
+            # 缩放并居中显示
+            scaled_pixmap = pixmap.scaled(
+                400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            
+            # 创建空白画布并居中绘制二维码
+            canvas = QPixmap(400, 400)
+            canvas.fill(Qt.white)
+            painter = QPainter(canvas)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # 计算居中位置
+            x = (canvas.width() - scaled_pixmap.width()) // 2
+            y = (canvas.height() - scaled_pixmap.height()) // 2
+            
+            # 绘制二维码
+            painter.drawPixmap(x, y, scaled_pixmap)
+            painter.end()
+            
+            # 设置二维码标签的对齐方式为居中
+            self.qr_label.setAlignment(Qt.AlignCenter)
+            self.qr_label.setPixmap(canvas)
+            
+        except Exception as e:
+            self.status_label.setText(f"显示二维码失败: {str(e)}")
+    
+    def timerEvent(self, event):
+        """定时器事件 - 检查登录状态"""
+        if event.timerId() == self.check_timer:
+            try:
+                # 添加时间戳和noCookie参数防止502错误
+                timestamp = int(time.time() * 1000)
+                try:
+                    check_res = requests.get(
+                        f"{self.api_url}/login/qr/check", 
+                        params={
+                            "key": self.key,
+                            "timestamp": timestamp,
+                            "noCookie": "true"
+                        }
+                    ).json()
+                    
+                    if not isinstance(check_res, dict):
+                        raise ValueError("Invalid response format")
+                        
+                    code = check_res.get("code", -1)
+                    message = check_res.get("message", "")
+                    cookie = check_res.get("cookie", "")
+                except Exception as e:
+                    print(f"检查登录状态出错: {e}")
+                    self.status_label.setText("检查登录状态出错")
+                    self.killTimer(self.check_timer)
+                    return
+                
+                if code == 800:
+                    self.status_label.setText("二维码已过期")
+                    self.killTimer(self.check_timer)
+                elif code == 801:
+                    self.status_label.setText("等待扫码...")
+                elif code == 802:
+                    self.status_label.setText("扫码成功，请确认")
+                elif code == 803:
+                    # 登录成功
+                    self.killTimer(self.check_timer)
+                    self.status_label.setText("登录成功！")
+                    if cookie:
+                        print(f"登录成功，获取到cookie: {cookie}")  # 打印cookie
+                        self.parent.cookies = cookie
+                        self.parent.save_cookie(cookie)  # 保存cookie到文件
+                        
+                        # 直接获取用户信息
+                        def get_user_info():
+                            try:
+                                # 调用用户详情接口
+                                headers = {
+                                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                                    "Cookie": cookie
+                                }
+                                response = requests.get(
+                                    f"{self.api_url}/user/account",
+                                    headers=headers
+                                )
+                                
+                                if response.status_code != 200:
+                                    print(f"请求失败，状态码: {response.status_code}")
+                                    self.parent.update_login_status("已登录")
+                                    return
+                                    
+                                detail_res = response.json()
+                                if not isinstance(detail_res, dict):
+                                    print("返回数据格式错误")
+                                    self.parent.update_login_status("已登录")
+                                    return
+                                
+                                if detail_res.get('code') == 200:
+                                    profile = detail_res.get('profile', {})
+                                    if not isinstance(profile, dict):
+                                        profile = {}
+                                    username = profile.get('nickname', '用户')
+                                    self.parent.update_login_status(f"你好！{username}")
+                                else:
+                                    print(f"获取用户信息失败: {detail_res}")
+                                    self.parent.update_login_status("已登录")
+                            except Exception as e:
+                                print(f"获取用户信息异常: {str(e)}")
+                                self.parent.update_login_status("已登录")
+                        
+                        get_user_info()  # 立即执行
+                        # 尝试播放一首歌测试登录状态
+                        try:
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                                "Cookie": cookie
+                            }
+                            test_res = requests.get(
+                                f"{self.api_url}/recommend/songs",
+                                headers=headers
+                            ).json()
+                            if test_res.get("code") == 200:
+                                self.status_label.setText("登录成功！")
+                            else:
+                                self.status_label.setText("登录状态验证失败")
+                        except Exception as e:
+                            print(f"验证登录状态失败: {e}")
+                    else:
+                        self.status_label.setText("获取cookie失败")
+                    QTimer.singleShot(1000, self.close)  # 1秒后关闭
+                    
+            except Exception as e:
+                self.status_label.setText(f"检查登录状态失败: {str(e)}")
+                self.killTimer(self.check_timer)
+    
+    def paintEvent(self, event):
+        """绘制窗口背景和边框"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制半透明背景
+        painter.setBrush(QBrush(QColor(20, 20, 30, 220)))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), 20, 20)
+        
+        # 绘制边框
+        border_gradient = QLinearGradient(0, 0, self.width(), self.height())
+        border_gradient.setColorAt(0, QColor(0, 180, 255, 100))
+        border_gradient.setColorAt(1, QColor(0, 100, 255, 100))
+        
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor(0, 180, 255, 80))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+
+    def mousePressEvent(self, event):
+        """鼠标按下事件(用于窗口拖动)"""
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件(用于窗口拖动)"""
+        if event.buttons() & Qt.LeftButton and self.drag_position:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+
+class CookieInputDialog(QDialog):
+    """自定义Cookie输入对话框"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("手动输入Cookie")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(500, 300)
+        
+        # 主布局
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+        
+        # 标题
+        title = QLabel("请输入网易云音乐Cookie:")
+        title.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+        
+        # 输入框
+        self.text_edit = QTextEdit()
+        self.text_edit.setStyleSheet("""
+            QTextEdit {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 10px;
+                padding: 15px;
+                color: white;
+                font-size: 16px;
+            }
+        """)
+        
+        # 按钮布局
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(15)
+        
+        # 确认按钮
+        btn_ok = QPushButton("确定")
+        btn_ok.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00b4ff, stop:1 #0080ff
+                );
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00c4ff, stop:1 #0090ff
+                );
+            }
+        """)
+        btn_ok.clicked.connect(self.accept)
+        
+        # 取消按钮
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        
+        layout.addWidget(title)
+        layout.addWidget(self.text_edit, stretch=1)
+        layout.addLayout(btn_layout)
+    
+    def get_cookie(self):
+        """获取输入的Cookie"""
+        return self.text_edit.toPlainText().strip()
+    
+    def paintEvent(self, event):
+        """绘制窗口背景和边框"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制半透明背景
+        painter.setBrush(QBrush(QColor(20, 20, 30, 220)))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), 20, 20)
+        
+        # 绘制边框
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor(0, 180, 255, 80))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+
+    def mousePressEvent(self, event):
+        """鼠标按下事件(用于窗口拖动)"""
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件(用于窗口拖动)"""
+        if event.buttons() & Qt.LeftButton and self.drag_position:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
 
 class ExitConfirmationWindow(QWidget):
     """退出确认窗口"""
