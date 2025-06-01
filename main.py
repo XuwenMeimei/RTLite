@@ -5,10 +5,10 @@ from threading import Thread
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame
+    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame, QDialog, QListWidget, QListWidgetItem
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve, QPoint
 from PySide6.QtGui import QPainter, QColor, QBrush, QPixmap, QLinearGradient, QFont, QTextCursor
 
 
@@ -16,9 +16,159 @@ class KeyListenerThread(QThread):
     toggle_visibility = Signal()
 
     def run(self):
-        keyboard.add_hotkey('right shift', lambda: self.toggle_visibility.emit())
-        keyboard.wait()
+        try:
+            keyboard.add_hotkey('right shift', self.emit_toggle_signal)
+            keyboard.wait()
+        except Exception as e:
+            print(f"键盘监听错误: {e}")
 
+    def emit_toggle_signal(self):
+        # 确保信号在主线程发出
+        self.toggle_visibility.emit()
+
+
+class SearchResultsWindow(QWidget):
+    """搜索结果独立窗口"""
+    def __init__(self, parent, songs):
+        super().__init__()
+        self.parent = parent
+        self.setWindowTitle("搜索结果")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(600, 400)
+        self.setMinimumSize(400, 300)
+        
+        # 主布局
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 30, 30, 30)
+        self.main_layout.setSpacing(20)
+        
+        # 标题栏
+        self.title_bar = QLabel("搜索结果")
+        self.title_bar.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 10px;
+                background: transparent;
+            }
+        """)
+        self.title_bar.setAlignment(Qt.AlignCenter)
+        
+        # 窗口拖动相关变量
+        self.drag_position = None
+        
+        # 搜索结果列表
+        self.list_widget = QListWidget()
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.list_widget.setStyleSheet("""
+            QListWidget {
+                background: rgba(50, 50, 60, 0.7);
+                border-radius: 15px;
+                padding: 10px;
+                color: white;
+                font-size: 16px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QListWidget::item {
+                padding: 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QListWidget::item:hover {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+            }
+            QListWidget::item:selected {
+                background: rgba(0, 180, 255, 0.3);
+                border-radius: 10px;
+                outline: none;
+            }
+        """)
+        
+        for song in songs:
+            name = song.get("name", "未知歌曲")
+            artists = ", ".join([ar.get("name", "未知歌手") for ar in song.get("artists", song.get("ar", []))])
+            item = QListWidgetItem(f"{name} - {artists}")
+            item.setData(Qt.UserRole, song["id"])
+            self.list_widget.addItem(item)
+        
+        # 播放按钮
+        self.btn_play = QPushButton("播放")
+        self.btn_play.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00b4ff, stop:1 #0080ff
+                );
+                border-radius: 15px;
+                padding: 12px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00c4ff, stop:1 #0090ff
+                );
+            }
+        """)
+        
+        self.btn_play.clicked.connect(self.on_play)
+        self.list_widget.itemDoubleClicked.connect(self.on_play)
+        
+        self.main_layout.addWidget(self.title_bar)
+        self.main_layout.addWidget(self.list_widget)
+        self.main_layout.addWidget(self.btn_play)
+    
+    def paintEvent(self, event):
+        """绘制窗口背景和边框"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制半透明背景
+        painter.setBrush(QBrush(QColor(20, 20, 30, 220)))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), 20, 20)
+        
+        # 绘制边框
+        border_gradient = QLinearGradient(0, 0, self.width(), self.height())
+        border_gradient.setColorAt(0, QColor(0, 180, 255, 100))
+        border_gradient.setColorAt(1, QColor(0, 100, 255, 100))
+        
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor(0, 180, 255, 80))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+
+    def mousePressEvent(self, event):
+        """鼠标按下事件(用于窗口拖动)"""
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件(用于窗口拖动)"""
+        if event.buttons() & Qt.LeftButton and self.drag_position:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def keyPressEvent(self, event):
+        """键盘事件"""
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
+    def on_play(self):
+        """播放选中的歌曲"""
+        selected = self.list_widget.currentItem()
+        if selected:
+            self.parent.play_song(selected.data(Qt.UserRole))
+            self.close()
 
 class ModernMusicPlayer(QWidget):
     def __init__(self):
@@ -384,33 +534,35 @@ class ModernMusicPlayer(QWidget):
 
     def toggle_visibility(self):
         """切换窗口可见性"""
-        if self.isVisible():
-            self.hide()
-        else:
-            self.show()
-            self.raise_()
-            self.activateWindow()
-
-    def search_and_play(self):
-        """搜索并播放音乐"""
-        keyword = self.search_input.text().strip()
-        if not keyword:
-            QMessageBox.warning(self, "提示", "请输入歌曲名称")
-            return
-
         try:
-            # 1. 搜索歌曲
-            res = requests.get(f"{self.api_url}/search", params={"keywords": keyword}).json()
-            songs = res.get("result", {}).get("songs", [])
-            if not songs:
-                self.show_message("未找到歌曲", "warning")
-                return
-            
-            # 获取第一首歌曲
-            song = songs[0]
-            song_id = song["id"]
+            if self.isVisible():
+                # 先关闭所有子窗口
+                if hasattr(self, 'search_window') and self.search_window:
+                    self.search_window.close()
+                if hasattr(self, 'exit_window') and self.exit_window:
+                    self.exit_window.close()
+                
+                # 添加短暂延迟确保窗口完全关闭
+                QApplication.processEvents()
+                
+                # 再隐藏主窗口
+                self.hide()
+            else:
+                self.show()
+                self.raise_()
+                self.activateWindow()
+        except Exception as e:
+            print(f"切换可见性出错: {e}")
 
-            # 2. 获取歌曲详情
+    def show_search_results(self, songs):
+        """显示搜索结果窗口"""
+        self.search_window = SearchResultsWindow(self, songs)
+        self.search_window.show()
+
+    def play_song(self, song_id):
+        """播放指定ID的歌曲"""
+        try:
+            # 获取歌曲详情
             detail_res = requests.get(f"{self.api_url}/song/detail", params={"ids": song_id}).json()
             songs_detail = detail_res.get("songs", [])
             if not songs_detail:
@@ -421,7 +573,7 @@ class ModernMusicPlayer(QWidget):
             song_name = detail["name"]
             artist_name = detail["ar"][0]["name"] if detail.get("ar") else "未知艺术家"
 
-            # 3. 获取播放链接
+            # 获取播放链接
             url_res = requests.get(f"{self.api_url}/song/url", params={"id": song_id}).json()
             song_url = url_res.get("data", [{}])[0].get("url")
             if not song_url:
@@ -447,6 +599,27 @@ class ModernMusicPlayer(QWidget):
             self.playing = True
             self.play_pause_button.setText("⏸")
             self.cover_animation.start()
+
+        except Exception as e:
+            self.show_message(f"请求失败: {str(e)}", "error")
+
+    def search_and_play(self):
+        """搜索音乐并显示结果列表"""
+        keyword = self.search_input.text().strip()
+        if not keyword:
+            QMessageBox.warning(self, "提示", "请输入歌曲名称")
+            return
+
+        try:
+            # 搜索歌曲
+            res = requests.get(f"{self.api_url}/search", params={"keywords": keyword}).json()
+            songs = res.get("result", {}).get("songs", [])
+            if not songs:
+                self.show_message("未找到歌曲", "warning")
+                return
+            
+            # 显示搜索结果对话框
+            self.show_search_results(songs)
 
         except Exception as e:
             self.show_message(f"请求失败: {str(e)}", "error")
@@ -690,11 +863,139 @@ class ModernMusicPlayer(QWidget):
     def keyPressEvent(self, event):
         """键盘事件"""
         if event.key() == Qt.Key_Escape:
-            self.close()
+            # 确保只有一个退出确认窗口实例
+            if not hasattr(self, 'exit_window') or not self.exit_window:
+                self.exit_window = ExitConfirmationWindow(self)
+            self.exit_window.show()
+            self.exit_window.raise_()
+            self.exit_window.activateWindow()
+        else:
+            super().keyPressEvent(event)
+
+class ExitConfirmationWindow(QWidget):
+    """退出确认窗口"""
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.setWindowTitle("退出确认")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(400, 200)
+        
+        # 主布局
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 30, 30, 30)
+        self.main_layout.setSpacing(20)
+        
+        # 标题
+        self.title_label = QLabel("退出确认")
+        self.title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        
+        # 提示文本
+        self.message_label = QLabel("确定要退出RTLite吗?")
+        self.message_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+            }
+        """)
+        self.message_label.setAlignment(Qt.AlignCenter)
+        
+        # 按钮布局
+        self.button_layout = QHBoxLayout()
+        self.button_layout.setSpacing(20)
+        
+        # 确认按钮
+        self.confirm_button = QPushButton("确定")
+        self.confirm_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00b4ff, stop:1 #0080ff
+                );
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00c4ff, stop:1 #0090ff
+                );
+            }
+        """)
+        self.confirm_button.clicked.connect(self.on_confirm)
+        
+        # 取消按钮
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 15px;
+                padding: 10px 20px;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        self.cancel_button.clicked.connect(self.close)
+        
+        self.button_layout.addWidget(self.confirm_button)
+        self.button_layout.addWidget(self.cancel_button)
+        
+        self.main_layout.addWidget(self.title_label)
+        self.main_layout.addWidget(self.message_label)
+        self.main_layout.addLayout(self.button_layout)
+    
+    def paintEvent(self, event):
+        """绘制窗口背景和边框"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制半透明背景
+        painter.setBrush(QBrush(QColor(20, 20, 30, 220)))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), 20, 20)
+        
+        # 绘制边框
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor(0, 180, 255, 80))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+
+    def on_confirm(self):
+        """确认退出"""
+        self.parent.close()
+        self.close()
+
+    def mousePressEvent(self, event):
+        """鼠标按下事件(用于窗口拖动)"""
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件(用于窗口拖动)"""
+        if event.buttons() & Qt.LeftButton and self.drag_position:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
 
     def closeEvent(self, event):
         """关闭事件"""
-        self.key_listener.terminate()
+        # 先关闭子窗口
+        if hasattr(self, 'search_window') and self.search_window:
+            self.search_window.close()
+        
         event.accept()
 
 
