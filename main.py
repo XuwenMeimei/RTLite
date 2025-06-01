@@ -5,10 +5,10 @@ from threading import Thread
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame, QDialog, QListWidget, QListWidgetItem
+    QLabel, QMessageBox, QSlider, QTextBrowser, QTextEdit, QFrame, QListWidget, QListWidgetItem
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve, QPoint
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize
 from PySide6.QtGui import QPainter, QColor, QBrush, QPixmap, QLinearGradient, QFont, QTextCursor
 
 
@@ -27,16 +27,145 @@ class KeyListenerThread(QThread):
         self.toggle_visibility.emit()
 
 
+class SongItemWidget(QWidget):
+    """自定义歌曲项Widget，显示封面、歌曲信息"""
+    def __init__(self, song, api_url, parent=None):
+        super().__init__(parent)
+        self.song = song
+        self.api_url = api_url
+        
+        # 主布局
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
+        
+        # 封面标签
+        self.cover_label = QLabel()
+        self.cover_label.setFixedSize(60, 60)
+        self.cover_label.setStyleSheet("""
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+        """)
+        self.cover_label.setScaledContents(True)
+        
+        # 默认封面
+        default_cover = QPixmap(60, 60)
+        default_cover.fill(QColor(50, 50, 60))
+        self.cover_label.setPixmap(default_cover)
+        
+        # 歌曲信息布局
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(5)
+        
+        # 歌曲名
+        name = song.get("name", "未知歌曲")
+        self.name_label = QLabel(name)
+        self.name_label.setStyleSheet("""
+            font-size: 16px;
+            font-weight: bold;
+            color: white;
+        """)
+        self.name_label.setMaximumWidth(400)
+        
+        # 歌手
+        artists = ", ".join([ar.get("name", "未知歌手") for ar in song.get("artists", song.get("ar", []))])
+        self.artist_label = QLabel(artists)
+        self.artist_label.setStyleSheet("""
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+        """)
+        
+        # 添加到信息布局
+        info_layout.addWidget(self.name_label)
+        info_layout.addWidget(self.artist_label)
+        info_layout.addStretch()
+        
+        # 时长
+        duration = song.get("duration", 0)  # 单位: 毫秒
+        minutes = duration // 60000
+        seconds = (duration % 60000) // 1000
+        duration_text = f"{minutes}:{seconds:02d}"
+        
+        self.duration_label = QLabel(duration_text)
+        self.duration_label.setStyleSheet("""
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+        """)
+        self.duration_label.setFixedWidth(50)
+        self.duration_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        # 添加到主布局
+        layout.addWidget(self.cover_label)
+        layout.addLayout(info_layout)
+        layout.addWidget(self.duration_label)
+        
+        # 异步加载封面
+        self.load_cover()
+    
+    def load_cover(self):
+        """异步加载封面图片 - 通过/song/detail接口获取封面"""
+        # 获取歌曲ID
+        song_id = self.song.get("id")
+        if not song_id:
+            return
+            
+        # 启动线程获取歌曲详情
+        def _load():
+            try:
+                # 调用/song/detail接口
+                detail_res = requests.get(
+                    f"{self.api_url}/song/detail", 
+                    params={"ids": song_id}
+                ).json()
+                
+                # 提取封面URL
+                songs_detail = detail_res.get("songs", [])
+                if not songs_detail:
+                    return
+                
+                song_detail = songs_detail[0]
+                cover_url = None
+                if "al" in song_detail and "picUrl" in song_detail["al"]:
+                    cover_url = song_detail["al"]["picUrl"]
+                
+                if not cover_url:
+                    return
+                
+                # 加载封面图片
+                img_data = requests.get(cover_url).content
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_data)
+                
+                # 创建圆形遮罩
+                rounded = QPixmap(60, 60)
+                rounded.fill(Qt.transparent)
+                
+                painter = QPainter(rounded)
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setBrush(QBrush(pixmap.scaled(60, 60, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
+                painter.setPen(Qt.NoPen)
+                painter.drawRoundedRect(0, 0, 60, 60, 5, 5)
+                painter.end()
+                
+                # 更新UI
+                self.cover_label.setPixmap(rounded)
+            except Exception as e:
+                print(f"加载封面失败: {e}")
+        
+        Thread(target=_load, daemon=True).start()
+
+
 class SearchResultsWindow(QWidget):
     """搜索结果独立窗口"""
-    def __init__(self, parent, songs):
+    def __init__(self, parent, songs, api_url):
         super().__init__()
         self.parent = parent
+        self.api_url = api_url
         self.setWindowTitle("搜索结果")
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(600, 400)
-        self.setMinimumSize(400, 300)
+        self.resize(700, 500)  # 增加宽度以适应更多内容
+        self.setMinimumSize(500, 400)
         
         # 主布局
         self.main_layout = QVBoxLayout(self)
@@ -61,7 +190,7 @@ class SearchResultsWindow(QWidget):
         
         # 搜索结果列表
         self.list_widget = QListWidget()
-        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         self.list_widget.setStyleSheet("""
@@ -72,28 +201,36 @@ class SearchResultsWindow(QWidget):
                 color: white;
                 font-size: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.1);
+                outline: none;
             }
             QListWidget::item {
-                padding: 12px;
+                background: transparent;
+                padding: 5px;
                 border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                outline: none;
             }
             QListWidget::item:hover {
                 background: rgba(255, 255, 255, 0.1);
                 border-radius: 10px;
+                outline: none;
             }
             QListWidget::item:selected {
                 background: rgba(0, 180, 255, 0.3);
                 border-radius: 10px;
                 outline: none;
             }
+            QListWidget::item:focus {
+                outline: none;
+            }
         """)
         
+        # 设置项高度
+        self.list_widget.setUniformItemSizes(True)
+        self.list_widget.setSpacing(5)
+        
+        # 添加歌曲项
         for song in songs:
-            name = song.get("name", "未知歌曲")
-            artists = ", ".join([ar.get("name", "未知歌手") for ar in song.get("artists", song.get("ar", []))])
-            item = QListWidgetItem(f"{name} - {artists}")
-            item.setData(Qt.UserRole, song["id"])
-            self.list_widget.addItem(item)
+            self.add_song_item(song)
         
         # 播放按钮
         self.btn_play = QPushButton("播放")
@@ -123,6 +260,20 @@ class SearchResultsWindow(QWidget):
         self.main_layout.addWidget(self.title_bar)
         self.main_layout.addWidget(self.list_widget)
         self.main_layout.addWidget(self.btn_play)
+    
+    def add_song_item(self, song):
+        """添加歌曲项到列表"""
+        # 创建自定义Widget
+        item_widget = SongItemWidget(song, self.api_url)
+        
+        # 创建QListWidgetItem
+        item = QListWidgetItem(self.list_widget)
+        item.setSizeHint(QSize(0, 80))  # 设置项高度
+        item.setData(Qt.UserRole, song["id"])  # 存储歌曲ID
+        
+        # 设置项Widget
+        self.list_widget.addItem(item)
+        self.list_widget.setItemWidget(item, item_widget)
     
     def paintEvent(self, event):
         """绘制窗口背景和边框"""
@@ -161,7 +312,6 @@ class SearchResultsWindow(QWidget):
             self.close()
         else:
             super().keyPressEvent(event)
-
 
     def on_play(self):
         """播放选中的歌曲"""
@@ -556,7 +706,7 @@ class ModernMusicPlayer(QWidget):
 
     def show_search_results(self, songs):
         """显示搜索结果窗口"""
-        self.search_window = SearchResultsWindow(self, songs)
+        self.search_window = SearchResultsWindow(self, songs, self.api_url)
         self.search_window.show()
 
     def play_song(self, song_id):
