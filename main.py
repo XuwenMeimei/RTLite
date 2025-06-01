@@ -23,7 +23,7 @@ class KeyListenerThread(QThread):
 class ModernMusicPlayer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("网易云音乐播放器")
+        self.setWindowTitle("RTLite")
         self.resize(1000, 600)
         self.setMinimumSize(800, 500)
         self.setWindowFlags(
